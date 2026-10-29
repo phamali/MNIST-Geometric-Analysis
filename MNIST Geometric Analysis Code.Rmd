@@ -1,13 +1,6 @@
 
 ---
 title: "Geometry Analysis of Handwritten Digits Using PCA, UMAP, and CCA"
-fontsize: 12pt
-output:
-  pdf_document: default
-  html_document:
-    df_print: paged
-header-includes: \usepackage{setspace}\doublespacing
-always_allow_html: true
 ---
 
 ```{r, message=FALSE}
