@@ -1,4 +1,4 @@
-# Geometry Analysis of MNIST Digits
+# Geometry Analysis of MNIST Digits 
 
 **Authors:** Alisha Pham, Tianye Dou
 
