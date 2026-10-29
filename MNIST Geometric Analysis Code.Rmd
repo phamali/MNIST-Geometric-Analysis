@@ -1,0 +1,985 @@
+
+---
+title: "Geometry Analysis of Handwritten Digits Using PCA, UMAP, and CCA"
+fontsize: 12pt
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+header-includes: \usepackage{setspace}\doublespacing
+always_allow_html: true
+---
+
+```{r, message=FALSE}
+# install.packages(c("ggplot2","dplyr","tidyverse","ggfortify","plotly"))
+# install.packages(c("umap", "viridis", "CCA", "CCP", "gridExtra")
+library(grid)
+library(gridExtra)
+library(CCA)
+library(CCP)
+library(viridis)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(ggfortify)
+library(plotly)
+library(umap)
+```
+
+
+```{r}
+# Visualization Helpers
+heatmap <- function(A){
+  n <- nrow(A); p <- ncol(A)
+  df <- data.frame(value = c(A), i = 1:n, j = rep(1:p, each = n))
+  ggplot(df, aes(j, i, fill = value)) +
+    geom_tile(color = "black") +
+    scale_fill_gradient2(low="#619CFF", mid="white", high="#F8766D") +
+    scale_y_reverse() +
+    coord_fixed()+
+    theme_void()
+}
+
+heatmap1 <- function(A) {
+  n <- nrow(A)
+  p <- ncol(A)
+  
+  df <- data.frame(
+    value = c(A),
+    i = 1:n,
+    j = rep(1:p, each = n)
+  )
+  
+  min_val <- min(df$value)
+  max_val <- max(df$value)
+  mid_val <- (min_val + max_val) / 2
+  
+  ggplot(df, aes(j, i, fill = value)) +
+    geom_tile(color = "black") +
+    scale_fill_gradientn(
+      colours = c("white", "#FF69B4", "#F8766D"),
+      values  = scales::rescale(c(min_val, mid_val, max_val))
+    ) + coord_fixed() +
+    scale_y_reverse() +
+    theme_void()
+}
+
+heatmap2 = function(A, addnames = FALSE){
+  n = nrow(A)
+  p = ncol(A)
+  rn = rownames(A)
+  cn = colnames(A)
+  if(is.null(rn)) rn = as.character(1:n)
+  if(is.null(cn)) cn = as.character(1:p)
+  df = data.frame(
+    value = c(A),
+    i = rep(1:n, times = p),
+    j = rep(1:p, each = n),
+    rowlab = factor(rep(rn, times = p), levels = rev(rn)),   # reversed order here
+    collab = factor(rep(cn, each = n), levels = cn)
+    )
+
+  plt = ggplot(df, aes(x = collab, y = rowlab, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient2(low = "#619CFF", mid = "white", high = "#F8766D")
+
+  if(addnames) return(plt +
+        theme_minimal() +
+        theme(axis.title = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), axis.text.y = element_text()))
+  else return(plt +
+        theme_void() +
+        theme(legend.position = "none"))
+}
+
+barplot_custom <- function(values){
+  n <- length(values)
+  df <- data.frame(value = values, index = 1:n)
+  ggplot(df, aes(index, value, fill = value)) +
+    geom_bar(stat = "identity", color = "black") +
+    scale_fill_gradient2(low="#619CFF", mid="white", high="#F8766D") +
+    theme_bw()
+}
+
+# Helper Function
+getdigit <- function(gsvalues){
+  matrix(unlist(gsvalues), 28, 28, byrow = TRUE)
+}
+```
+
+## 1. Introduction
+This project investigates structural properties of the MNIST dataset using Principal Component Analysis (PCA), Uniform Manifold Approximation and Projection (UMAP), and Canonical Correlation Analysis (CCA). Our goal is to examine how different dimensionality reduction and correlation methods reveal about within-digit variation, global manifold structure and symmetry across digit classes.
+
+Our first question examines how the leading PCA directions differ across digit classes, allowing us to identify the dominant geometric variations characteristic of each digit. The second question analyzes the differences in how PCA and UMAP represent the global MNIST manifold in three dimensions, and how the UMAP parameter choices influence digit separation. Finally, we use top–bottom and left–right CCA to assess how strongly the upper and lower halves of each digit image correspond, providing a quantitative measure of horizontal and vertical symmetry across classes. We chose these questions because PCA, UMAP, and CCA provide complementary perspectives on the structural properties of the dataset.
+
+## 2. Data Summary
+
+The MNIST dataset used in this project contains 5,000 grayscale images of handwritten digits (0–9), with 500 images per class. Each image corresponds to a 28 × 28 grid with grayscale intensities from [0,255], represented as a 784 dimensional feature vector. To preprocess the data, we standardize the full MNIST dataset and each digit subset. The dataset contains no missing values.
+
+```{r}
+# Load Data
+#df <- read.csv("mnist.csv", check.names = FALSE)
+df <- read.csv("/Users/phamalis/Desktop/mnist.csv", check.names = FALSE)
+dim(df)
+
+# Check missing values
+sum(is.na(df))
+
+# Rename columns
+n_pixels = ncol(df) - 1
+colnames(df) <- c("label", paste0("pixel", 1:n_pixels))
+all_pixel_names <- paste0("pixel", 1:n_pixels)
+
+# Split into digits
+df = df %>% mutate(label = factor(label))
+df %>% group_by(label) %>%
+  summarize(n = n())
+
+# Split into label and pixels
+labels <- df$label
+pixels <- df[, -1]
+
+# Standardize and center
+sds <- apply(pixels, 2, sd)
+pixel_nonzero_sd_names <- names(sds[sds != 0])
+pixel_zero <- names(sds[sds == 0])
+pixels_std <- scale(pixels[, pixel_nonzero_sd_names])
+pixels_std_all <- cbind(pixels_std, pixels[pixel_zero])
+pixels_std_all <- pixels_std_all[, all_pixel_names]
+
+# Check standardization and mean
+df_std <- data.frame(label = factor(labels), pixels_std_all)
+summary(colMeans(df_std[, -1]))
+summary(apply(df_std[, -1], 2, sd))
+
+dim(df_std)
+
+# Function to standardize a single digit subset
+standardize_one_digit <- function(df, digit_value) {
+  
+  # Keep only the chosen digit
+  df_digit <- df %>% filter(label == digit_value)
+  
+  # Split into label and pixels
+  labels_digit <- df_digit$label
+  pixels_digit <- df_digit[, all_pixel_names]
+
+  # Standardize and center within this digit only
+  sds_digit <- apply(pixels_digit, 2, sd)
+  pixel_nonzero_sd_names_digit <- names(sds_digit[sds_digit != 0])
+  pixel_zero_digit <- names(sds_digit[sds_digit == 0])
+  
+  pixels_std_digit <- scale(pixels_digit[, pixel_nonzero_sd_names_digit, drop = FALSE])
+  pixels_std_all_digit <- cbind(pixels_std_digit,
+                                pixels_digit[, pixel_zero_digit, drop = FALSE])
+  
+  # Reorder columns back to the original pixel order
+  pixels_std_all_digit <- pixels_std_all_digit[, all_pixel_names]
+  
+  # Recombine into a standardized df for this digit
+  df_digit_std <- data.frame(label = factor(labels_digit), pixels_std_all_digit)
+  
+  return(df_digit_std)
+}
+
+# Standardize Zero
+df_0_std <- standardize_one_digit(df, 0)
+summary(colMeans(df_0_std[, -1]))
+summary(apply(df_0_std[, -1], 2, sd))
+dim(df_0_std)
+
+# Standardize One
+df_1_std <- standardize_one_digit(df, 1)
+summary(colMeans(df_1_std[, -1]))
+summary(apply(df_1_std[, -1], 2, sd))
+dim(df_1_std)
+
+# Standardize Two
+df_2_std <- standardize_one_digit(df, 2)
+summary(colMeans(df_2_std[, -1]))
+summary(apply(df_2_std[, -1], 2, sd))
+dim(df_2_std)
+
+# Standardize Three
+df_3_std <- standardize_one_digit(df, 3)
+summary(colMeans(df_3_std[, -1]))
+summary(apply(df_3_std[, -1], 2, sd))
+dim(df_3_std)
+
+# Standardize Four
+df_4_std <- standardize_one_digit(df, 4)
+summary(colMeans(df_0_std[, -1]))
+summary(apply(df_4_std[, -1], 2, sd))
+dim(df_4_std)
+
+# Standardize Five
+df_5_std <- standardize_one_digit(df, 5)
+summary(colMeans(df_5_std[, -1]))
+summary(apply(df_5_std[, -1], 2, sd))
+dim(df_5_std)
+
+# Standardize Six
+df_6_std <- standardize_one_digit(df, 6)
+summary(colMeans(df_6_std[, -1]))
+summary(apply(df_6_std[, -1], 2, sd))
+dim(df_6_std)
+
+# Standardize Seven
+df_7_std <- standardize_one_digit(df, 7)
+summary(colMeans(df_7_std[, -1]))
+summary(apply(df_7_std[, -1], 2, sd))
+dim(df_7_std)
+
+# Standardize Eight
+df_8_std <- standardize_one_digit(df, 8)
+summary(colMeans(df_8_std[, -1]))
+summary(apply(df_8_std[, -1], 2, sd))
+dim(df_8_std)
+
+# Standardize Nine
+df_9_std <- standardize_one_digit(df, 9)
+summary(colMeans(df_9_std[, -1]))
+summary(apply(df_9_std[, -1], 2, sd))
+dim(df_9_std)
+
+```
+To summarize the overall characteristics of the dataset, we computed a mean pixel image heatmap and a table reporting the mean and standard deviation of the number of zero valued pixels for each digit class. The mean pixel heatmap tells us about the average structure of each digit while the table of mean zero valued pixels illustrate the coverage of the image by the digit itself versus the background, highlighting how much of the image area is occupied by blank space. The accompanying standard deviation captures the variation in zero valued pixels within each digit class, which equivalently measures how consistently each digit occupies space across samples.
+
+# Mean Pixel Image Heatmap
+The mean pixel images reveal the average structure of each handwritten digit in each class. Several digits, 0, 1, 4, 5, 8, and 9, show a varying right tilt. The average image for digit 1 contains a faint horizontal mark on the top and bottom of the main digit structure, indicating that not all writers draw the digit as a purely vertical line. For digits 4, 7, and 9, a subtle horizontal bar appears at the bottom of the digit, suggesting variation in how different writers complete the final stroke. Digit 7 also shows a faint downward hook at the beginning, reflecting that some individuals include this stylistic feature. More generally, the mean images highlight these characteristics: digit 0 is slightly oval, digit 2 has a small loop, digit 3 is straight and curved and 5 has a distinct flat top.
+```{r}
+# Compute the mean pixel intensity for each digit
+pixel_mean_per_digit <- df %>%
+  group_by(label) %>%
+  summarize(
+    across(starts_with("pixel"), mean)
+  )
+
+# Stores 10 heatmaps
+plots <- vector("list", 10)
+
+for (d in 0:9) {
+  # Extract the mean pixel row for specific digit
+  mean_row <- pixel_mean_per_digit %>%
+    filter(label == d) %>%
+    select(-label)
+  
+  # Convert vector into matrix
+  mean_matrix <- getdigit(mean_row)
+  
+  # Create heatmap for this digit's mean pixel pattern
+  plots[[d+1]] <- 
+    heatmap(mean_matrix) +
+    ggtitle(paste("Digit", d))
+}
+
+
+grid.arrange(grobs = plots, ncol = 5)
+```
+
+# Mean & Standard Deviation of Zero Pixels
+```{r}
+df_raw <- df
+
+df_zero_counts <- df_raw %>%
+  # Count how many pixels are exactly zero in each row
+  mutate(num_zero_pixels = rowSums(across(-label, ~ .x == 0)))
+
+# Summarize zero pixel statistics for each digit class
+zero_summary <- df_zero_counts %>%
+  group_by(label) %>%
+  summarise(
+    mean_zero_pixels = mean(num_zero_pixels),
+    sd_zero_pixels   = sd(num_zero_pixels),
+    .groups = "drop"
+  )
+
+zero_summary
+```
+Digit 1 has the highest number of zero valued pixels, reflecting its thin and simple structure. In contrast, digit 0 has the fewest zero pixels, indicating that if the digit were laid flat it would be the longest digit or that it is drawn thicker than other digits. This implies that digit 1 occupies the least amount of space in the image, while digit 0 occupies the greatest. The remaining digits fall between 610 and 653 zero pixels. Ordering the digit classes from the fewest to the most zero valued pixels gives the sequence: 0, 8, 2, 3, 6, 5, 4, 9, 7, and 1.
+
+Across all digit classes, the standard deviations is relatively small. Digit 1 has the smallest standard deviation (~19.7), reflecting how uniformly people draw the length and thickness of the digit. In contrast, digits such as 0, 2, 3, 5 and 6 have larger standard deviations (33-34), suggesting greater variability in stroke thickness, curvature, or overall shape. The remaining digits, 4,7,8 and 9, have moderate standard deviation that range between 26 to 31. Overall, the variability is modest for all digits, but digits with more complex shapes exhibit slightly greater differences in how much area they occupy across samples.
+
+## 3. Methodology
+
+This section summarizes the dimensionality reduction and multivariate methods employed in the analysis: PCA, UMAP, and CCA.
+
+# Principal Component Analysis
+
+PCA is a linear dimensionality reduction method that identifies the directions of maximal variance in high dimensional data; these directions are called the principal directions. Equivalently, if the original data lies in R^p and we reduce it to R^r, PCA chooses the r dimensional subspace that minimizes reconstruction error, the difference between the original data and their projection onto the subspace spanned by the first r principal directions.
+
+# Uniform Manifold Approximation and Projection
+
+UMAP is a nonlinear dimensionality reduction technique designed to preserve the geometric structure of high-dimensional data in a chosen lower dimensional space. UMAP will first construct a weighted k nearest neighbour graph of the original data, $x_1,..., x_n$, where larger weights are assigned to neighbours that lie closer together.
+
+The algorithm then optimizes the embedding, $z_1,..., z_n$, in the lower dimensional space that best preserves these neighbourhood relationships. Specifically, UMAP optimizes the embedding so that the weighted k-NN graph constructed in R^r minimizes cross entropy relative to the original high-dimensional graph. By minimizing cross entropy, UMAP ensures that points that are close in the original space remain close in the embedding.
+
+UMAP has two parameters: n_neighbors and min_dist. The n_neighbours parameter determines the size of the local region considered when building the weighted k nearest neighbor graph. Smaller n_neighbours values emphasize very local relationships, while larger values allow UMAP to capture broader, more global patterns in the data. In contrast, min_dist controls the minimum allowed distance between points in the low dimensional embedding. Smaller min_dist values allow points to form dense clusters, whereas larger values force clusters to be more spread out. Importantly, min_dist does not affect which points are considered neighbors; rather, it only affects how the embedding visually arranges points after the graph is constructed.
+
+# Canonical Correlation Analysis
+
+CCA is a method designed to identify relationships between two datasets, X and Y, that contain distinct sets of variables measured on the same observations. It finds linear combinations of the variables in X and linear combinations of the variables in Y that are maximally correlated. Equivalently, CCA determines vectors u and v such that the correlation between the projected variables $u^TX$ and $v^TY$ is maximized.
+
+## 4. PCA on Individual Digit Classes
+
+# 4.1 Research Question
+How do the leading PCA directions differ across MNIST digit classes?
+
+# 4.2 Motivation
+Understanding the dominant modes of variation within each digit provides insight into which geometric transformations, such as slant, thickness, curvature, or width, vary the most among handwritten samples. PCA is well suited for this analysis because it identifies orthogonal directions of maximal variance within each digit class, allowing us to characterize digit-specific structural differences.
+
+# 4.3 Approach
+First, we applied PCA to each digit class' standardized pixel matrix and examined the first two principal components. Then, we generated PCA score plots (PC1 vs. PC2) for each digit class to identify observations exhibiting extreme values along each component while the other component remains near zero. For digits that do not have an image that These selected images were then visualized. Then, we examined the eigendigits for each digit class, visualizing both the positive and negative directions of PC1 and PC2. Finally, we compared them with the extreme images to interpret the dominant modes of variation captured by each component.
+
+# 4.4 Result
+For all digits, the interpretations of the eigendigits are consistent with the extreme observations identified in the corresponding score plot. We will discuss the geometric interpretations of the positive and negative PC directions for each digit. These two directions reflect opposite extremes of the same pixel pattern as at each pixel position, the positive and negative directions have opposite effects: one increases the pixel’s intensity, while the other decreases it.
+```{r}
+# Remove the label column from each digit-specific standardized dataset
+zeroes = df_0_std[,-1]
+ones = df_1_std[,-1]
+twos = df_2_std[,-1]
+threes = df_3_std[,-1]
+fours = df_4_std[,-1]
+fives = df_5_std[,-1]
+six = df_6_std[,-1]
+seven = df_7_std[,-1]
+eight = df_8_std[,-1]
+nine = df_9_std[,-1]
+```
+
+```{r}
+# PCA on each digit class
+PCA_0 = prcomp(zeroes)
+PCA_1 = prcomp(ones)
+PCA_2 = prcomp(twos)
+PCA_3 = prcomp(threes)
+PCA_4 = prcomp(fours)
+PCA_5 = prcomp(fives)
+PCA_6 = prcomp(six)
+PCA_7 = prcomp(seven)
+PCA_8 = prcomp(eight)
+PCA_9 = prcomp(nine)
+```      
+
+```{r}
+# Store PCA results for each digit
+pca_list <- list(
+  "0" = PCA_0, "1" = PCA_1, "2" = PCA_2, "3" = PCA_3, "4" = PCA_4,
+  "5" = PCA_5, "6" = PCA_6, "7" = PCA_7, "8" = PCA_8, "9" = PCA_9
+)
+
+# Store the raw pixel matrices for each digit
+digit_data <- list(
+  "0" = zeroes, "1" = ones, "2" = twos, "3" = threes, "4" = fours,
+  "5" = fives, "6" = six, "7" = seven, "8" = eight, "9" = nine
+)
+
+# Pre selected IDs for each digit
+id_list <- list(
+  "0" = c("351","312","96","97","165","159","414","359"),
+  "1" = c("183","136","95","454","181","246","369","469","112","355"),
+  "2" = c("446","348","377","104","54","389","346","222"),
+  "3" = c("414","291","294","72","268","389","465","201"),
+  "4" = c("382","318","416","273","457","390","344","160"),
+  "5" = c("137","50", "476","128","379"),
+  "6" = c("113","4","249","181","108","275","379","477"),
+  "7" = c("197","145","201","457","418","343","220","430","299","18"),
+  "8" = c("218","477","268","406","484","404","281","31"),
+  "9" = c("385","213","333","267","78","162","48","134")
+)
+
+# Plot PCA score plot
+plot_digit_outliers <- function(digit, pca_obj, X, id_list_vec) {
+  
+  # Extract PC1 and PC2 scores
+  scores <- as.data.frame(pca_obj$x[, 1:2])
+  colnames(scores) <- c("PC1", "PC2")
+  
+  # Add observation index to match the raw digit data
+  scores$obs_num <- rownames(X)
+  
+  # Split points into normal vs. outliers
+  outliers <- scores[rownames(scores) %in% id_list_vec, ]
+  normal   <- scores[!(rownames(scores) %in% id_list_vec), ]
+  
+  # Create score plot
+  ggplot() +
+    geom_text(data = normal, aes(x = PC1, y = PC2, label = obs_num),
+              color = "black", size = 1.5) +
+    geom_text(data = outliers, aes(x = PC1, y = PC2, label = obs_num),
+              color = "red", size = 1.5) +
+    labs(title = paste("Digit", digit, "PCA Score Plot")) +
+    theme_minimal()
+}
+
+# Loop through digits 0–9 and plot score plot
+for (d in 0:9) {
+  d_str <- as.character(d)
+  print(
+    plot_digit_outliers(
+      digit = d_str,
+      pca_obj = pca_list[[d_str]],
+      X = digit_data[[d_str]],
+      id_list_vec = id_list[[d_str]]
+    )
+  )
+}
+```
+
+```{r}
+# Visualize Eigendigits
+plot_eigendigits_pm <- function(pca_result, digit_label,
+                                pcs = c(1, 2),
+                                nrow = 28, ncol = 28) {
+  # save & restore par so we don't mess up other plots in the report
+  old_par <- par(no.readonly = TRUE)
+  on.exit(par(old_par))
+
+  # two columns: (-) and (+); one row per PC
+  par(mfrow = c(length(pcs), 2), mar = c(1, 1, 3, 1))
+
+  for (k in pcs) {
+    loading <- pca_result$rotation[, k]
+
+    eig_minus <- matrix(-loading, nrow = nrow, ncol = ncol, byrow = TRUE)
+    eig_plus  <- matrix( loading, nrow = nrow, ncol = ncol, byrow = TRUE)
+
+    # negative direction
+    image(
+      t(apply(eig_minus, 2, rev)),
+      col  = gray(seq(0, 1, length = 256)),
+      axes = FALSE,
+      asp  = 1,
+      main = paste("Digit", digit_label, "\nPC", k, "(-)")
+    )
+
+    # positive direction
+    image(
+      t(apply(eig_plus, 2, rev)),
+      col  = gray(seq(0, 1, length = 256)),
+      axes = FALSE,
+      asp  = 1,
+      main = paste("Digit", digit_label, "\nPC", k, "(+)")
+    )
+  }
+}
+
+for (d in 0:9) {
+  plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(d)]],
+    digit_label = d,
+    pcs = c(1, 2)
+  )
+}
+```
+
+# Zero
+The PC1+ direction highlights pixels that make the zero look more circular, especially by adding thickness in the top-leftand bottom-right parts of the digit. In contrast, the PC1– direction emphasizes an ovular zero that leans to the right.
+
+The PC2+ direction corresponds to an upright zero, while the PC2– direction represents a zero that leans to the right, with additional thickness in the bottom-left and top-right regions.
+
+There is a complementary relationship between the types of variation: PC1+ thickens the digit along one diagonal, while PC2– thickens it along the opposite diagonal. In addition, the PC1 eigendigits appear smoother and more symmetric, whereas the PC2 eigendigits are less symmetric and smooth.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 0
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(0)]],
+    digit_label = 0,
+    pcs = c(1, 2)
+)
+
+# Visualize specific digit images
+plots <- list(
+  heatmap1(getdigit(zeroes["351",])),
+  heatmap1(getdigit(zeroes["96",])),
+  heatmap1(getdigit(zeroes["165",])),
+  heatmap1(getdigit(zeroes["414",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2)
+```
+
+# One
+The PC1+ direction corresponds to one’s that tilt right, whereas the PC1– direction captures ones that are drawn upright. The PC2+ direction reflects a stylized one that begins with a small diagonal hook at the top and a horizontal band at the bottom. In contrast, the PC2– direction reflects ones that lack these additional features. Note that the observation with a low PC2 score does not lie near zero on PC1. Nevertheless, its pixel pattern is still consistent with our interpretation of PC2 and supports the claim.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 1
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(1)]],
+    digit_label = 1,
+    pcs = c(1, 2)
+)
+
+plots <- list(
+  heatmap1(getdigit(ones["95",])),
+  heatmap1(getdigit(ones["136",])),
+  heatmap1(getdigit(ones["246",])),
+  heatmap1(getdigit(ones["245",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2)  
+```
+
+# Two
+The PC1+ direction corresponds to a two without a loop, a thin tail that curves upwards, and a starting curve that has smaller width than the horizontal bottom. In contrast, the PC1– direction puts weight on two’s with a loop that leans to the right.
+
+Both PC2 directions represent twos without a loop. The PC2+ direction represents twos that have a thicker tail and appear shorter overall, while the PC2– direction captures a large two with relatively less of a curved top. 
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 2
+plot_eigendigits_pm(
+    pca_result  = pca_list[["2"]],
+    digit_label = 2,
+    pcs         = c(1, 2)
+  )
+
+plots <- list(
+  heatmap1(getdigit(twos["446",])),
+  heatmap1(getdigit(twos["377",])),
+  heatmap1(getdigit(twos["54",])),
+  heatmap1(getdigit(twos["346",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2) 
+```
+
+# Three
+The PC1+ direction corresponds to a right leaning curved three, whereas the PC1– direction represents a left leaning curved three. The PC2+ direction highlights the stylized three with a flatter top and sharp diagonal at connecting point. In contrast, the PC2– direction removes the pixels associated with this stylized shape.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 3
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(3)]],
+    digit_label = 3,
+    pcs = c(1, 2)
+)
+
+plots <- list(
+  heatmap1(getdigit(threes["414",])),
+  heatmap1(getdigit(threes["72",])),
+  heatmap1(getdigit(threes["268",])),
+  heatmap1(getdigit(threes["201",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2)  
+```
+
+# Four
+The PC1 eigendigit places strong weight on the first vertical stroke while placing little emphasis on the upper portion of the second vertical stroke. As a result, observations with extreme PC1 scores differ in how tall and pronounced the first vertical line appears relative to the second. The PC1+ direction highlights additional thickness along the first and at the end of the final vertical stroke, whereas the PC1– direction corresponds to a thinner, right-leaning version of the digit. The PC2+ eigendigit emphasizes a full vertical final stroke, while the PC2– direction emphasizes a diagonal final stroke.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 4
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(4)]],
+    digit_label = 4,
+    pcs = c(1, 2)
+)
+
+plots <- list(
+  heatmap1(getdigit(fours["382",])),
+  heatmap1(getdigit(fours["416",])),
+  heatmap1(getdigit(fours["390",])),
+  heatmap1(getdigit(fours["160",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2)  
+
+```
+
+# Five
+The PC1– direction corresponds to a stylized 5 with a straight horizontal bar, straight vertical line and large loop. In contrast, the PC1+ direction emphasizes an upward tilting horizontal stroke and a smaller loop. The PC2– direction captures another stylized variant of the digit, characterized by an upward angled horizontal bar and a larger loop. Conversely, the PC2+ direction reduces the stylized features seen in PC2–.
+
+Due to the distribution of scores in the digit-5 score plot, there is no handwritten sample that is large in the PC2+ direction while maintaining an approximately zero PC1 score. As a result, we illustrate PC2+ using two representative images: one with large PC2+ and PC1+ scores, and another with large PC2+ and PC1– scores. From visual inspection, these images appear to reflect mixtures of the corresponding principal-component directions.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 5
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(5)]],
+    digit_label = 5,
+    pcs = c(1, 2)
+)
+
+plots <- list(
+  heatmap1(getdigit(fives["137",])),
+  heatmap1(getdigit(fives["50",])),
+  heatmap1(getdigit(fives["476",])),
+  heatmap1(getdigit(fives["128",])),
+  heatmap1(getdigit(fives["379",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2)  
+```
+
+# Six
+The PC1+ direction corresponds to a six whose starting stroke is more vertical and noticeably thicker, producing a larger, rounder loop. In contrast, the PC1– direction reflects a six with a thinner, more diagonal initial stroke and a comparatively smaller loop. The PC2+ direction resembles the shape found in PC1– but appears shifted slightly to the left and thinner. Conversely, the PC2– direction removes the pixels that define the PC2+ shape and adds pixel intensity to the surrounding regions.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 6
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(6)]],
+    digit_label = 6,
+    pcs = c(1, 2)
+)
+
+plots <- list(
+    heatmap1(getdigit(six["113",])),
+    heatmap1(getdigit(six["249",])),
+    heatmap1(getdigit(six["275",])),
+    heatmap1(getdigit(six["379",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2) 
+```
+
+# Seven
+The PC1+ direction corresponds to a seven whose vertical line is diagonal and the horizontal line is straight, whereas the PC1– direction represents a form with a less angled vertical stroke, a stylized beginning stroke and a horizontal bar that points upwards. The PC2+ and PC2- direction reinforces a similar structure as in PC1+ and PC1– however PC2+ has a more straight vertical line than PC1+ and PC2- reinforces a very diagonal line.
+
+Similarly to five, there is no handwritten sample that is large in the PC2– direction while maintaining an approximately zero PC1 score. As a result, we illustrate PC2– using two representative images: one with large PC2– and PC1+ scores, and another with large PC2– and PC1– scores.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 7
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(7)]],
+    digit_label = 7,
+    pcs = c(1, 2)
+)
+
+plots <- list(
+  heatmap1(getdigit(seven["197",])),
+  heatmap1(getdigit(seven["201",])),
+  heatmap1(getdigit(seven["430",])),
+  heatmap1(getdigit(seven["18",])),
+  heatmap1(getdigit(seven["418",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2) 
+```
+
+# Eight
+The PC1+ direction corresponds to an eight that leans left, where the PC1– direction represents an eight that tilts right. The PC2 eigendigit reflects differences in the thickness and continuity of the vertical structure. The PC2+ direction highlights a thin, straight, vertically aligned eight, while the PC2– direction emphasizes an eight where the middle portion between left and right are missing.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 8
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(8)]],
+    digit_label = 8,
+    pcs = c(1, 2)
+)
+
+plots <- list(
+  heatmap1(getdigit(eight["477",])),
+  heatmap1(getdigit(eight["268",])),
+  heatmap1(getdigit(eight["484",])),
+  heatmap1(getdigit(eight["31",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2) 
+```
+
+# Nine
+The PC1+ direction corresponds to a nine with a smaller loop, a right tilt, and an overall thinner appearance. In contrast, the PC1– direction reflects a nine that is more upright, thicker, and features a larger open loop. The PC2+ direction resembles a similar shape as PC1+ with a larger right tilt and a different emphasis of the loop, top right. PC2– direction captures an upright nine with a smaller loop.
+```{r}
+# Plot the ± eigendigits for PC1 and PC2 of digit 9
+plot_eigendigits_pm(
+    pca_result  = pca_list[[as.character(9)]],
+    digit_label = 9,
+    pcs = c(1, 2)
+)
+
+plots <- list(
+  heatmap1(getdigit(nine["213",])),
+  heatmap1(getdigit(nine["267",])),
+  heatmap1(getdigit(nine["162",])),
+  heatmap1(getdigit(nine["134",]))
+)
+
+grid.arrange(grobs = plots, ncol = 2) 
+```
+
+## 5. PCA vs UMAP on Global Digit Structure
+
+# 5.1 Research Question
+How do PCA and UMAP differ in their three-dimensional representations of the global MNIST digit manifold, and how do UMAP’s parameters affect digit separation?
+
+# 5.2 Motivation
+
+Understanding how different dimensionality reduction methods represent the global structure of the MNIST digit manifold provides insight into the geometric relationships among handwritten digits. PCA offers a linear projection that preserves the dominant patterns of variation in the data, while UMAP constructs a nonlinear embedding that emphasizes local neighbourhoods. Comparing these two methods in three dimensions allows us to assess how each technique displays the arrangement of digit groups, their overlap, and the global structure of the underlying manifold. Additionally, examining the effect of UMAP’s parameters reveals how sensitive digit separation is to the neighbourhood graph on which UMAP is built and to visualization constraints. This comparison highlights the strengths and limitations of linear versus nonlinear methods in capturing high dimensional image structure.
+
+# 5.3 Approach
+
+First, we applied PCA to the standardized global MNIST dataset and projected all observations onto the first three principal components to visualize the dominant patterns of variation among the digits. Second, we applied UMAP to the same dataset to obtain a three dimensional embedding. Then, we systematically varied UMAP’s parameters, n_neighbours and min_dist and examined how these adjustments affected digit separation and cluster geometry. Finally, after determining the parameters that best separate digits, we compared the 3D PCA projection with the UMAP embedding under the optimal parameter settings, evaluating how each method preserved digit clusters and relationships between digits.
+
+# 5.4 Result
+
+# 3D PCA on Global MNIST Dataset
+Projecting the MNIST dataset onto the first three principal components results in a dense 3-dimensional projection in which many of the digit classes overlap.
+```{r, message=FALSE}
+# UMAP Preprocessing
+digits <- df_std[, -1]
+labels <- df_std$label
+
+# Perform PCA on the digit data
+PCA = prcomp(digits)
+
+# Custom ggplot
+ggplot_colors = function(n) {
+  hues = seq(15, 375, length.out = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Build dataframe
+df = data.frame(PCA$x, label = df_std$label)
+plot_ly(df, x = ~PC1, y = ~PC2, z = ~PC3, color = ~label, type = 'scatter3d',
+        mode = 'text', text = ~label, textposition = 'middle right', colors = ggplot_colors(10)) %>%
+  layout(showlegend = FALSE)
+
+# Generate interactive 3D scatterplot of the first three PCs
+ggplot(df, aes(PC1, PC2, color = factor(label))) +
+  geom_point(alpha = 0.6) +
+  theme_minimal()
+```
+The digits exhibit distinct patterns in how they vary along the principal components. Digit 0 spreads mainly along negative PC1 and across PC2, with comparatively little variation on PC3. Digit 1 forms one of the most compact clusters, remaining nearly constant along PC1 and showing only modest spread along PC2 and PC3. Digit 2 contains the largest positive PC3 scores, extending the furthest in this direction than any other digit. In contrast, Digit 7 reaches the lowest PC3 values, occupying the most negative region of this component. Digit 4 lies predominantly in positive PC1 and negative PC3, with a PC2 spread similar in width to that of the overall dataset. Several digits, 3, 5, 6, 8 and 9, overlap substantially near the center of the projection, forming a broad intermixed region with no clear separation.
+
+Together, these patterns highlight that while some digits occupy characteristic regions along the principal components, many exhibit overlapping variability. To conclude, the first three PCs do not yield distinctly separable digit clusters.
+
+# UMAP Parameter Exploration
+To demonstrate the effect of UMAP parameters on digit separation, we compare four parameter settings, two values of n_neighbours (5 and 200) and two values of min_dist (0.01 and 0.5), with each pair evaluated while holding the other parameter fixed. Specifically, we use min_dist = 0.1 when varying n_neighbours and n_neighbours = 20 when varying min_dist.
+```{r, message=FALSE}
+# UMAP Preprocessing
+digits <- df_std[, -1]
+labels <- df_std$label
+
+# Loop through each parameter combination
+param_grid <- list(
+  list(name = "Small n_neighbours", n_neighbors = 5,  min_dist = 0.1),
+  list(name = "Large n_neighbours", n_neighbors = 200,  min_dist = 0.1),
+  list(name = "Small min_dist", n_neighbors = 20, min_dist = 0.01),
+  list(name = "Large min_dist", n_neighbors = 20, min_dist = 0.5)
+)
+
+plots <- list()
+
+for (i in seq_along(param_grid)) {
+  p <- param_grid[[i]]
+  # Run UMAP with chosen hyperparameters
+  umap_fit <- umap(
+    digits,
+    n_components = 3,
+    n_neighbors = p$n_neighbors,
+    min_dist = p$min_dist,
+    metric = "euclidean",
+    verbose = TRUE
+  )
+  
+  coords <- umap_fit$layout
+  
+  # Build dataframe for plotting
+  umap_df <- data.frame(
+    UMAP1 = coords[, 1],
+    UMAP2 = coords[, 2],
+    UMAP3 = coords[, 3],
+    label = as.factor(labels)
+  )
+  
+  cols <- scales::hue_pal()(length(levels(umap_df$label)))
+  
+  # Generate interactive 3D scatter plot
+  plots[[i]] <- plot_ly(
+    umap_df,
+    x = ~UMAP1, y = ~UMAP2, z = ~UMAP3,
+    color = ~label,
+    text = ~label,
+    type = "scatter3d",
+    mode = "text",
+    textfont = list(size = 8),
+    colors = cols
+  ) %>% layout(
+    title = p$name,
+    showlegend = FALSE
+  )
+}
+
+# Display desired plot, e.g.
+plots[[1]]
+plots[[2]]
+plots[[3]]
+plots[[4]]
+```
+From our demonstration we see that when n_neighbors is set too low, UMAP focuses on very local relationships, causing each digit to break apart into small subclusters rather than forming a coherent class level grouping. In contrast, when n_neighbors is too high, the embedding becomes overly global and different digits begin to overlap. Meanwhile, when min_dist is small, UMAP pulls same digit points very close together, forming tight and compact clusters where within class variation becomes difficult to see. Conversely, larger min_dist values spread each digit out more broadly, increasing visible variation within a class but also causes neighboring digits to drift closer together and sometimes overlap.
+
+# 3D UMAP on Global MNIST Dataset
+From experimenting with different parameter settings, we find that the configuration that produced the strongest digit separation based on visual inspection is n_neighbors = 21 and min_dist = 0.09.
+```{r,message=FALSE}
+
+umap_fit <- umap(
+  digits,
+  n_components = 3,
+  n_neighbors = 21,
+  min_dist = 0.09,
+  metric = "euclidean",
+  verbose = TRUE
+)
+
+# Extract the coordinates
+coords <- umap_fit$layout
+
+umap_df <- data.frame(
+  UMAP1 = coords[, 1],
+  UMAP2 = coords[, 2],
+  UMAP3 = coords[, 3],
+  label = labels
+)
+
+umap_df$label <- factor(umap_df$label)
+cols <- scales::hue_pal()(length(levels(labels))) 
+
+#3D ggplot
+plot_ly(
+  umap_df,
+  x = ~UMAP1, y = ~UMAP2, z = ~UMAP3,
+  color = ~label,
+  text = ~label,
+  textfont = list(size = 8),
+  type = "scatter3d",
+  mode = "text",
+  colors = cols
+) %>% layout(showlegend = FALSE)
+```
+
+```{r}
+umap_fit <- umap(
+  digits,
+  n_components = 3,
+  n_neighbors  = 21,
+  min_dist     = 0.09,
+  metric       = "euclidean",
+  verbose      = TRUE
+)
+
+# Extract the coordinates
+coords <- umap_fit$layout
+
+umap_df <- data.frame(
+  UMAP1 = coords[, 1],
+  UMAP2 = coords[, 2],
+  UMAP3 = coords[, 3],
+  label = factor(labels)
+)
+
+# --- 2. Choose which digits you want to DISPLAY ---------------------------
+# e.g. only show digits 0, 1, and 2 (change this set as you like)
+digits_to_show <- c(0,6,1,2)
+
+plot_df <- umap_df %>%
+  filter(label %in% digits_to_show)
+
+# colour palette based on all labels (or you can do based on plot_df$label)
+cols <- scales::hue_pal()(length(levels(umap_df$label)))
+
+# --- 3. 3D plot only for the chosen digits --------------------------------
+plot_ly(
+  plot_df,
+  x = ~UMAP1, y = ~UMAP2, z = ~UMAP3,
+  color = ~label,
+  text  = ~label,
+  textfont = list(size = 8),
+  type  = "scatter3d",
+  mode  = "text",
+  colors = cols
+) %>% layout(showlegend = FALSE)
+```
+
+UMAP produces distinct clusters for each digit, and overall does a strong job separating the MNIST classes in low dimensions. Every digit forms its own identifiable region in the embedding, but the boundaries between clusters are not perfect. Small pockets of mixing appear throughout the manifold, particularly between digits with similar geometric shapes. In the following, we detail the separation quality in the UMAP embedding. 
+
+UMAP produces distinct clusters for each digit and, overall, does a strong job separating the MNIST classes in low dimensions. Each digit forms its own identifiable region in the embedding, although the boundaries between clusters are not perfectly. In certain cases, examples of one digit appear inside the cluster of another. Furthermore, this misplacement is often reciprocal, meaning that when digit A appears inside digit B’s cluster, there are also instances of digit B appearing inside digit A’s region. This suggests that UMAP has some difficulty distinguishing between specific pairs of digits. Notable examples include occasional cross placements between 0 and 6, as well as instances of 4, 7, and 9 appearing within one another’s clusters. Additionally, even though digits generally form separate clusters, the clusters for 3, 5, and 8 partially overlap at one end, indicating shared structural variation that UMAP in 3 dimensions cannot fully disentangle.
+
+# PCA vs. UMAP: Digit Separation in Three Dimensions
+In conclusion, PCA and UMAP perform differently when separating digits in three dimensions. PCA produces wide, spread out clusters in which many digit classes overlap, due to the limitations of its linear models which cannot fully capture the nonlinear variation in handwritten digits. In contrast, UMAP forms clear, compact clusters for most digits, showing much stronger class separation in low dimensions. While UMAP still exhibits occasional cross placement between visually similar digits, its nonlinear structure preserving model provides significantly cleaner separation than PCA, making it more effective for visualizing handwritten digit variation in three dimensions.
+
+## 6. CCA on Top and Bottom Halves of Digits
+
+# 6.1 Research Question
+How do canonical correlations between the top and bottom halves of digits differ, and what do these differences reveal about the horizontal symmetry of each digit?
+
+# 6.2 Motivation
+
+It is obvious for the human eye to observe that some digits (e.g. 0) are horizontally symmetric while other digits (e.g. 2) are not. Instead of relying on visual intuition, we want to turn this into a numerical scale. CCA is an ideal tool for this setting because it measures the maximum linear association between two high-dimensional sets. Thus, we use CCA to examine and quantify how the horizontal symmetry differs for the top and bottom halves of each digit.
+
+# 6.3 Approach 
+
+We use CCA to investigate the linear relationship between the upper and lower halves of the same digit class. We choose digits 0, 2, 7 to investigate. For each digit class, we split it horizontally: columns 1-392 form the upper half and columns 393-784 form the lower half. Thus we have two data blocks for the given digit: X refers to the top half and Y refers to the bottom half.
+Before applying CCA, we first apply PCA separately to the upper and lower halves for each digit and retain the 50 leading principal components, since CCA cannot perform on a high-dimensional dataset. These PCs approximately explain 90% of the variance in each half. We apply CCA on the 50-dimensional PC scores matrices $X_r$ and $Y_r$ of each digit class. 
+For each digit, we have ordered canonical correlations $\rho_1 \geq ...  \geq \rho_{50}$. We then sum the first 50 canonical correlations of each given digit: $S = \sum_{k=1}^{50} \rho_k$. A higher score indicates that the two halves have a stronger liner relationship, while a lower score indicates weaker correspondence, which confirms the visual asymmetry.
+
+# 6.4 Result
+The culumulative for digit 0, 2, 7 are 22.34629, 18.31396, and 19.6098.
+Digit 0 has the highest cumulative correlation, as its shape is almost perfectly symmetric. 
+Digit 7's cumulative correlation ranks in the middle. Although its overall shape is asymmetric, both halves share a dominant vertical line.
+Digit 2 has the lowest cumulative correlation because its top half is a curved loop and its bottom half is nearly horizontal.
+The results match what our eyes suggest about the horizonal symmetry.
+
+```{r}
+# split the dataset horizontally
+top_cols <- 1:392
+bottom_cols <- 393:784
+
+top_half_0 <- zeroes[, top_cols]
+bottom_half_0 <- zeroes[, bottom_cols]
+
+top_half_2 <- twos[, top_cols]
+bottom_half_2 <- twos[, bottom_cols]
+
+top_half_7 <- seven[, top_cols]
+bottom_half_7 <- seven[, bottom_cols]
+```
+
+```{r}
+X.pca <- prcomp(top_half_0)
+Y.pca <- prcomp(bottom_half_0)
+Xr<-X.pca$x[,1:50]
+Yr<-Y.pca$x[,1:50]
+result_0<- cc(Xr, Yr)
+sum_corr_0 <- sum(result_0$cor[1:50])
+sum_corr_0
+```
+
+```{r}
+X.pca <- prcomp(top_half_2)
+Y.pca <- prcomp(bottom_half_2)
+Xr<-X.pca$x[,1:50]
+Yr<-Y.pca$x[,1:50]
+result_2<- cc(Xr, Yr)
+sum_corr_2 <- sum(result_2$cor[1:50])
+sum_corr_2
+```
+
+```{r}
+X.pca <- prcomp(top_half_7)
+Y.pca <- prcomp(bottom_half_7)
+Xr<-X.pca$x[,1:50]
+Yr<-Y.pca$x[,1:50]
+result_7<- cc(Xr, Yr)
+sum_corr_7 <- sum(result_7$cor[1:50])
+sum_corr_7
+```
+
+## 7. Discussion
+
+In the following we will discuss the limitations and future directions of our project.
+
+# 7.1 Limitations
+
+# Limitations on Research Question 1
+
+Although PCA provides interpretable directions of maximal variation within each digit class, several limitations arise from this approach. First, PCA is strictly linear and therefore cannot capture nonlinear variations in handwriting style that may be present within a digit class. Second, the interpretation of principal directions relies on visual inspection of selected extreme-score images, which introduces subjectivity into the analysis.
+
+# Limitations on Research Question 2
+
+Our comparison of PCA and UMAP in three dimensions is limited by the non rigorous procedure used to select the optimal UMAP parameter settings. The “optimal” values of n_neighbors and min_dist were chosen based on visual inspection of how well the digits appeared to separate in the 3D embedding, rather than through a formal quantitative criterion. This introduces subjectivity and may bias our conclusions about UMAP’s performance. Additionally, UMAP embeddings can vary across runs due to difference in initialization, and we did not incorporate multiple runs.
+
+# Limitations on Research Question 3
+CCA can only capture the linear dependence between the top and bottom halves of each digit. Thus, if the correspondence is nonlinear, CCA may underestimate the true symmetry. Moreover, we only analyze the horizontal symmetry of three digits (0, 2, 7). Analyzing the diagonal and vertical symmetry of all ten digit classes can provide more complete information on the digit symmetry.
+
+# 7.2 Future Work
+
+# Future Directions for Research Question 1
+
+Future work could explore alternative dimensionality reduction methods that may reveal different or more nuanced patterns of variation within each digit class. Since our analysis focused on interpreting the linear principal components of each digit, applying methods such Kernel PCA offers a nonlinear extension of PCA that may uncover variations that are not well represented in a strictly linear subspace. Additionally, applying Factor Analysis would allow us to model variation in terms of latent factors under a probabilistic framework.
+
+# Future Directions for Research Question 2
+
+Future work could focus on quantitatively assessing the degree of digit separation achieved by PCA and UMAP rather than relying solely on visual inspection. One promising direction is to evaluate separation using a k nearest neighbours classifier applied directly to the three dimensional embeddings.
+
+# Future Directions for Research Question 3
+
+Moving forward, we can extend the digit symmetry analysis to all ten digit classes and examine the diagnola and vertical symmetry.
