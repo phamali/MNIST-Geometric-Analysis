@@ -21,7 +21,7 @@ Specifically, our analysis addresses three core research questions:
   * Quantified background sparsity via the mean and standard deviation of zero-valued pixels per class. Digit `1` exhibits the highest background sparsity ($\mu = 699.13, \sigma = 19.67$), whereas Digit `0` occupies the largest spatial footprint ($\mu = 590.30, \sigma = 34.05$).
 
 <p align="center">
-  <img src="figures/fig1_mean_pixel_heatmap.png" width="85%" alt="Mean Pixel Image Heatmap">
+  <img src="figures/mean_pixel_heatmap.png" width="85%" alt="Mean Pixel Image Heatmap">
   <br>
   <em>Figure 1: Class-wise mean pixel intensity heatmaps across digits 0–9.</em>
 </p>
@@ -45,7 +45,7 @@ We performed class-specific PCA on the standardized pixel matrices for each digi
 * **Stylistic Flourishes:** $\text{PC2}$ frequently isolates secondary calligraphic features, such as top hooks and horizontal base bars in `1` and `7`, flat vs. curved tops in `3`, and broken vs. continuous midsections in `8`.
 
 <p align="center">
-  <img src="figures/fig2_eigendigits_heatmaps.png" width="90%" alt="Eigendigits and Extreme PC Score Heatmaps">
+  <img src="figures/eigendigits_heatmaps.png" width="90%" alt="Eigendigits and Extreme PC Score Heatmaps">
   <br>
   <em>Figure 2: Leading eigendigits (PC1±, PC2±) and extreme principal component score heatmaps for digits 0–9.</em>
 </p>
@@ -59,7 +59,7 @@ We projected the complete 5,000-image dataset into $\mathbb{R}^3$ to compare glo
 * **Optimal 3D UMAP (`n_neighbors = 21`, `min_dist = 0.09`):** Achieves clear 3D class separation across all 10 digits, successfully disentangling nonlinear shape variations (such as `6` vs. `9`) that overlap in PCA space. Reciprocal cross-placements remain only among structurally ambiguous pairs (`0` vs. `6`, `4/7/9`, and shared boundary tails across `3/5/8`).
 
 <p align="center">
-  <img src="figures/fig3_pca_vs_umap_3d.png" width="90%" alt="3D PCA vs Optimal 3D UMAP">
+  <img src="figures/pca_vs_umap_3d.png" width="90%" alt="3D PCA vs Optimal 3D UMAP">
   <br>
   <em>Figure 3: Comparison of 3D global MNIST embeddings using (a) PCA and (b) optimal UMAP (n_neighbors = 21, min_dist = 0.09).</em>
 </p>
